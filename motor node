@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""
+motor_control_node.py
+ROS2 node that drives an L298N-controlled rover (1 rear drive motor,
+1 front steering motor) from geometry_msgs/Twist commands on /cmd_vel.
+
+Also publishes a rough dead-reckoning odometry on /odom. This is a
+PLACEHOLDER -- it drifts significantly. Replace with rf2o_laser_odometry
+(lidar-scan-based odometry) before trusting the map it feeds into.
+
+Wiring (BCM GPIO numbering -- NOT physical pin numbers):
+    IN1 -> GPIO5   (rear motor direction A)   [physical pin 29]
+    IN2 -> GPIO6   (rear motor direction B)   [physical pin 31]
+    IN3 -> GPIO17  (front motor direction A)  [physical pin 11]
+    IN4 -> GPIO27  (front motor direction B)  [physical pin 13]
+    ENA -> GPIO12  (rear motor PWM / speed)   [physical pin 32]
+    ENB -> GPIO13  (front motor PWM / speed)  [physical pin 33]
+
+Requires:
+    pip install gpiozero rpi-lgpio
+    (RPi.GPIO is NOT compatible with the Pi 5's RP1 chip -- gpiozero's
+    lgpio backend is what actually works here)
+"""
+
+import math
+
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Twist, TransformStamped
+from nav_msgs.msg import Odometry
+from tf2_ros import TransformBroadcaster
+
+from gpiozero import Motor, Device
+from gpiozero.pins.lgpio import LGPIOFactory
+
+Device.pin_factory = LGPIOFactory()
+
+# --- Tunables: measure these on your actual rover before trusting odom ---
+MAX_LINEAR_MS = 0.3       # m/s at full commanded throttle
+STEER_THRESHOLD = 0.05    # rad/s deadband below which front motor stays off
+STEER_DUTY = 0.6          # fixed PWM duty whenever steering is active (open-loop)
+DRIVE_DUTY_SCALE = 1.0    # scales |linear.x| (0-1) -> rear motor PWM duty
+
+
+class RoverMotorController(Node):
+    def __init__(self):
+        super().__init__('motor_control_node')
+
+        self.rear = Motor(forward=5, backward=6, enable=12, pwm=True)
+        self.front = Motor(forward=17, backward=27, enable=13, pwm=True)
+
+        self.create_subscription(Twist, '/cmd_vel', self.cmd_vel_cb, 10)
+        self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
+        self.tf_broadcaster = TransformBroadcaster(self)
+
+        self.x = 0.0
+        self.y = 0.0
+        self.theta = 0.0
+        self.last_time = self.get_clock().now()
+        self.last_linear = 0.0
+        self.last_angular = 0.0
+
+        self.create_timer(0.05, self.update_odom)  # 20 Hz
+
+        self.get_logger().info('Motor control node started.')
+
+    def cmd_vel_cb(self, msg: Twist):
+        linear = max(min(msg.linear.x, 1.0), -1.0)
+        angular = msg.angular.z
+
+        # Rear drive motor: linear velocity -> speed + direction
+        duty = max(min(abs(linear) * DRIVE_DUTY_SCALE, 1.0), 0.0)
+        if linear > 0.01:
+            self.rear.forward(duty)
+        elif linear < -0.01:
+            self.rear.backward(duty)
+        else:
+            self.rear.stop()
+
+        # Front steering motor: open-loop bang-bang (no position feedback
+        # on this axis -- consider adding a potentiometer + ADC later for
+        # closed-loop steering)
+        if angular > STEER_THRESHOLD:
+            self.front.forward(STEER_DUTY)
+        elif angular < -STEER_THRESHOLD:
+            self.front.backward(STEER_DUTY)
+        else:
+            self.front.stop()
+
+        self.last_linear = linear
+        self.last_angular = angular
+
+    def update_odom(self):
+        now = self.get_clock().now()
+        dt = (now - self.last_time).nanoseconds / 1e9
+        self.last_time = now
+
+        v = self.last_linear * MAX_LINEAR_MS
+        w = self.last_angular  # commanded angular.z used directly -- rough
+
+        self.x += v * math.cos(self.theta) * dt
+        self.y += v * math.sin(self.theta) * dt
+        self.theta += w * dt
+
+        odom = Odometry()
+        odom.header.stamp = now.to_msg()
+        odom.header.frame_id = 'odom'
+        odom.child_frame_id = 'base_link'
+        odom.pose.pose.position.x = self.x
+        odom.pose.pose.position.y = self.y
+        odom.pose.pose.orientation.z = math.sin(self.theta / 2.0)
+        odom.pose.pose.orientation.w = math.cos(self.theta / 2.0)
+        odom.twist.twist.linear.x = v
+        odom.twist.twist.angular.z = w
+        self.odom_pub.publish(odom)
+
+        tf = TransformStamped()
+        tf.header.stamp = now.to_msg()
+        tf.header.frame_id = 'odom'
+        tf.child_frame_id = 'base_link'
+        tf.transform.translation.x = self.x
+        tf.transform.translation.y = self.y
+        tf.transform.rotation.z = math.sin(self.theta / 2.0)
+        tf.transform.rotation.w = math.cos(self.theta / 2.0)
+        self.tf_broadcaster.sendTransform(tf)
+
+    def destroy_node(self):
+        self.rear.stop()
+        self.front.stop()
+        super().destroy_node()
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = RoverMotorController()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
