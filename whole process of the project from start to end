@@ -1,0 +1,269 @@
+1. Project Idea & Objective
+
+We started with the idea of building a low-cost autonomous surveillance rover that can:
+
+Move through an unknown indoor environment
+
+Detect obstacles
+
+Create a digital map using LiDAR
+
+Estimate its position (localization)
+
+Be useful for defence surveillance and reconnaissance
+
+2.COMPONENTS REQUIRED:
+Raspberry pi 5 4gb
+L298N motor driver
+BO motors (4)
+Ultrasonic sensor
+jumper wires
+wheels and chassis
+12v battery
+power bank(for Raspberry pi)
+
+3.Connections for RPI to Motor driver are as follows
+L298N	         Raspberry Pi GPIO
+ENA	           GPIO 12 (PWM)
+IN1	           GPIO 17
+IN2	           GPIO 18
+ENB	           GPIO 13 (PWM)
+IN3	           GPIO 22
+IN4	           GPIO 23
+GND	           Pi GND
+
+4.Ultrasonic Sensor
+Sensor Pins  Raspberry Pi GPIO
+TRIG         GPIO24
+ECHO         GPIO25 (through voltage divider)
+
+
+5.Operating System Installation
+
+We first experimented with Raspberry Pi OS and Ubuntu, then finalized:
+
+Final OS
+
+Ubuntu 24.04.4 LTS (Noble Numbat) on Raspberry Pi 5
+
+Installed using Raspberry Pi Imager.
+
+6. Remote Access Setup
+
+To avoid working directly on the Pi screen, we configured:
+
+SSH
+
+Microsoft Remote Desktop (RDP)
+
+RustDesk (backup remote access)
+
+Tailscale for secure network access
+
+This allowed us to control the Pi from the laptop.
+
+7. ROS 2 Installation
+
+We moved from ROS1 concepts to ROS 2 Jazzy.
+
+Installed
+
+ROS 2 Jazzy
+
+Colcon build tools
+
+RViz2
+
+Navigation-related dependencies
+
+Workspace creation
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws
+colcon build
+
+Then we sourced:
+
+source /opt/ros/jazzy/setup.bash
+source ~/ros2_ws/install/setup.bash
+8. YDLIDAR Driver Setup
+Clone driver
+cd ~/ros2_ws/src
+git clone https://github.com/YDLIDAR/ydlidar_ros2_driver.git
+Build
+cd ~/ros2_ws
+colcon build --symlink-install
+Configure X2
+
+We edited the parameter file:
+
+X2.yaml
+
+Baudrate = 115200
+
+Port = /dev/ttyUSB0
+
+9. Verify LiDAR Data
+
+We launched the driver:
+
+ros2 launch ydlidar_ros2_driver ydlidar_launch.py
+
+Then checked topics:
+
+ros2 topic list
+
+Important topic:
+
+/scan
+
+We verified scan frequency:
+
+ros2 topic hz /scan
+
+Result was approximately 11–12 Hz, confirming the LiDAR was working properly.
+
+10. SLAM Toolbox Installation
+
+We used slam_toolbox for real-time mapping.
+
+Launch
+ros2 launch slam_toolbox online_async_launch.py
+
+This created:
+
+/map
+
+/map_metadata
+
+/tf
+
+/pose
+
+11. TF (Transform) Configuration
+
+Initially SLAM failed because the laser frame was not connected.
+
+We discovered:
+
+LiDAR frame = laser_frame
+
+Robot base frame = base_link
+
+Static transform
+ros2 run tf2_ros static_transform_publisher 0 0 0.02 0 0 0 base_link laser_frame
+
+This was a critical step that connected the LiDAR to the robot coordinate system.
+
+12. RViz Visualization
+
+We opened RViz2 and configured:
+
+Fixed Frame: laser_frame
+
+Added LaserScan → Topic /scan
+
+Added Map → Topic /map
+
+Added TF display
+
+At first only scan points appeared; after the TF fix, walls and the occupancy grid map became visible.
+
+13. Localization & Mapping
+
+With SLAM running, the system simultaneously:
+
+Mapping (SLAM)
+
+Converted LiDAR scans into an occupancy grid
+
+Built a 2D floor plan of the surroundings
+
+Localization
+
+Estimated the LiDAR/robot position on the map
+
+Published pose information on /pose
+
+This achieved Simultaneous Localization and Mapping.
+
+14. Motor Control Programming
+
+We wrote a Python ROS2-compatible motor controller using lgpio.
+
+Logic implemented
+
+Forward: all motors run
+
+Obstacle detected: stop immediately
+
+Turn Left: left-side control logic
+
+Turn Right: right-side control logic
+
+15. Ultrasonic Obstacle Avoidance
+
+We integrated the HC-SR04 sensor.
+
+Working logic
+
+Measure distance continuously
+
+If distance < threshold (e.g., 20 cm) → STOP
+
+Then choose a new direction
+
+This provided a secondary safety layer in addition to LiDAR.
+
+16. System Architecture
+FINAL ARCHITECTURE
+ROS 2 JAZZY
+
+YDLIDAR X2
+
+/scan
+Raspberry Pi 5
+SLAM Toolbox
+Localization
+Obstacle Logic
+
+Ultrasonic
+
+Obstacle stop
+
+L298N Driver
+
+Motor control
+Autonomous Rover
+Mapping • Localization • Navigation
+17. Final Launch Sequence
+
+Whenever the project is started, we run these in order.
+
+Terminal 1 – LiDAR
+source ~/ros2_ws/install/setup.bash
+ros2 launch ydlidar_ros2_driver ydlidar_launch.py
+Terminal 2 – SLAM
+source ~/ros2_ws/install/setup.bash
+ros2 launch slam_toolbox online_async_launch.py
+Terminal 3 – TF
+ros2 run tf2_ros static_transform_publisher 0 0 0.02 0 0 0 base_link laser_frame
+Terminal 4 – RViz
+rviz2
+Terminal 5 – Rover Control
+python3 motor_control_node.py
+18. Final Outcome
+What the project successfully achieved
+
+360° LiDAR scanning
+
+Real-time SLAM mapping
+
+Occupancy grid / floor plan generation
+
+Localization of the robot on the map
+
+Obstacle detection using ultrasonic sensor
+
+Autonomous movement logic
+
+Low-cost implementation on Raspberry Pi 5
